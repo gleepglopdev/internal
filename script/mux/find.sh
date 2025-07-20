@@ -11,6 +11,28 @@ USAGE() {
 
 . /opt/muos/script/var/func.sh
 
+# TODO:
+# Changing directories and running the script results in, seemingly random occurrences of, an unkillable zombie process.
+# Switching between "Local" and "Global" search across directories consistently causes system lock-ups.
+#
+# The script fails with complex content structures, including multi-tiered directories.
+# https://github.com/MustardOS/internal/pull/573#issuecomment-3093861488
+#
+# Solution: Consider re-introducing some intermediate IO back in to avoid long running process?
+
+# TODO:
+# re: FRIENDLY_JSON
+# This was a missed file during a recent commit for the friendly file naming scheme system.
+# You will need to ensure it is being used at /run/muos/storage/info/name/global.json.
+# https://github.com/MustardOS/internal/pull/573#discussion_r2217660401
+
+# TEMP
+DEBUG_LOG="$(GET_VAR "device" "storage/rom/mount")/MUOS/info/debug.log"
+# Output the raw command line arguments to the debug log, with a timestamp
+echo "$(date '+%Y-%m-%d %H:%M:%S') - Running find.sh" >> "$DEBUG_LOG"
+echo "  Command: $0 $*" >> "$DEBUG_LOG"
+# TEMP
+
 RESULTS_JSON="$(GET_VAR "device" "storage/rom/mount")/MUOS/info/search.json"
 SKIP_FILE="$(GET_VAR "device" "storage/sdcard/mount")/MUOS/info/skip.ini"
 [ ! -s "$SKIP_FILE" ] && SKIP_FILE="$(GET_VAR "device" "storage/rom/mount")/MUOS/info/skip.ini"
@@ -20,18 +42,23 @@ S_TERM="$1"
 # Shift one argument over so we are left with only directories to search
 shift
 
+# Create temporary directory for intermediate files
+TMP_DIR=$(mktemp -d)
+trap 'rm -rf "$TMP_DIR"' EXIT INT TERM
+
+TMP_MATCHES="$TMP_DIR/matches.txt"
+
 # Convert directories array to JSON
 directories=$(printf '%s\n' "$@" | jq -R . | jq -s .)
 
-# Process all directories and create JSON structure in a single pipeline
-{
-	# Process each directory and output all matching files
-	for S_DIR in "$@"; do
-		# rg --files: List all files in directory (no content search, just enumerate files)
-		# --color=never: Disable ANSI color codes (clean output for piping)
-		# --ignore-file: Use skip.ini to exclude unwanted files/directories
-		# 2>/dev/null: Suppress permission denied errors
-		/opt/muos/bin/rg --color=never --files "$S_DIR" --ignore-file "$SKIP_FILE" 2>/dev/null |
+# First stage: Find matching files and store in temporary file
+# Process each directory separately to avoid long-running pipeline
+for S_DIR in "$@"; do
+    # rg --files: List all files in directory (no content search, just enumerate files)
+    # --color=never: Disable ANSI color codes (clean output for piping)
+    # --ignore-file: Use skip.ini to exclude unwanted files/directories
+    # 2>/dev/null: Suppress permission denied errors
+    /opt/muos/bin/rg --color=never --files "$S_DIR" --ignore-file "$SKIP_FILE" 2>/dev/null |
 
 		# rg (second call): Filter filenames by search term
 		# --color=never: Disable ANSI color codes for clean piping
@@ -41,10 +68,15 @@ directories=$(printf '%s\n' "$@" | jq -R . | jq -s .)
 		#   /: Match paths ending with slash (file paths)
 		#   (?!.*\/): Negative lookahead - ensure no slash after this point
 		#   .*$S_TERM: Match any characters followed by search term
-		# || true: Prevent script exit when no matches found (rg exits with status 1)
-		/opt/muos/bin/rg --color=never --pcre2 -i "/(?!.*\/).*$S_TERM" || true
-	done
-} |
+		/opt/muos/bin/rg --color=never --pcre2 -i "/(?!.*\/).*$S_TERM" |
+        # sed: Remove the leading directory path from each file (only affects local search)
+        # || true: Prevent script exit when no matches found (rg exits with status 1)
+        sed "s|^$S_DIR/||" >> "$TMP_MATCHES" || true
+done
+
+# Second stage: Process the collected matches into JSON
+# This avoids keeping the entire pipeline active for the full duration
+cat "$TMP_MATCHES" |
 # Input to jq: File paths (one per line)
 # Example:
 #   /mnt/sdcard/ROMS/Pico-8/awesome_platform_adventure.p8
@@ -68,7 +100,9 @@ jq -R . | jq -s --arg lookup "$S_TERM" --argjson directories "$directories" '
 	# map({...}): Transform each group into key-value pair object
 	map({
 		# key: .[0].dir: Use directory from first object in group (all have same dir)
-		key: .[0].dir,
+		# If directory is empty (e.g. local search, with path removed by sed above),
+		# use "." instead
+		key: (.[0].dir | if . == "" then "." else . end),
 
 		# value: {content: [...]}: Create object with "content" array
 		# map(.file): Extract "file" field from each object in group
