@@ -51,6 +51,10 @@ TMP_MATCHES="$TMP_DIR/matches.txt"
 # Convert directories array to JSON
 directories=$(printf '%s\n' "$@" | jq -R . | jq -s .)
 
+read up rest </proc/uptime; t1="${up%.*}${up#*.}"
+# run a thing you want to time
+
+
 # First stage: Find matching files and store in temporary file
 # Process each directory separately to avoid long-running pipeline
 for S_DIR in "$@"; do
@@ -73,6 +77,18 @@ for S_DIR in "$@"; do
         # || true: Prevent script exit when no matches found (rg exits with status 1)
         sed "s|^$S_DIR/||" >> "$TMP_MATCHES" || true
 done
+
+read up rest </proc/uptime; t2="${up%.*}${up#*.}"
+
+millisec=$(( 10*(t2-t1) ))
+rg_runtime=$(echo "scale=3; $millisec / 1000" | bc)
+
+echo "$(date '+%Y-%m-%d %H:%M:%S') - Measuring rg_runtime" >> "$DEBUG_LOG"
+echo "  rg_runtime: $rg_runtime" >> "$DEBUG_LOG"
+
+####
+
+read up rest </proc/uptime; t1="${up%.*}${up#*.}"
 
 # Second stage: Process the collected matches into JSON
 # This avoids keeping the entire pipeline active for the full duration
@@ -134,3 +150,11 @@ jq -R . | jq -s --arg lookup "$S_TERM" --argjson directories "$directories" '
 	#   }
 	{lookup: $lookup, directories: $directories, folders: .}
 ' > "$RESULTS_JSON"
+
+read up rest </proc/uptime; t2="${up%.*}${up#*.}"
+
+millisec=$(( 10*(t2-t1) ))
+jq_runtime=$(echo "scale=3; $millisec / 1000" | bc)
+
+echo "$(date '+%Y-%m-%d %H:%M:%S') - Measuring jq_runtime" >> "$DEBUG_LOG"
+echo "  jq_runtime: $jq_runtime" >> "$DEBUG_LOG"
